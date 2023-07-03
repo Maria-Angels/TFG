@@ -1,0 +1,1178 @@
+---
+title: "**2. DADES DE LES ILLES BALEARS**"
+author: "Maria Àngels Jaume"
+date: "2023-03-11"
+output: 
+  html_document:
+    toc: true
+    toc_depth: 5
+    toc_float:
+      collapsed : false
+      smooth_scroll: true
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(readxl)
+library(forecast)
+library(segmented)
+library(plotly)
+library(ggplot2)
+library(ggfortify)
+library(reshape2)
+library(car)
+library(nortest)
+```
+
+## **1. LECTURA DE DADES**
+
+En aquest document farem el mateix estudi que amb les dades de Mallorca però utilitzant les de totes les illes en conjunt. Els càlculs i procediments són anàlegs al de l'illa de Mallorca, per això obviarem alguns detalls.
+
+En primer lloc, grafiquem en forma de sèrie temporal aquestes dades:
+
+```{r}
+turisme <- read_excel("IBESTAT.xls")
+turisme$Data <- gsub("M","-",turisme$Data)
+gastos.ts<-ts(turisme[-1], start=c(2015,10), frequency = 12)
+
+ib <- data.frame(x=1:86, y=turisme$IB) #dades de totes les illes en conjunt
+
+serie_ib <- ts(ib$y,start=c(2015,10),frequency = 12)
+plot.ts(serie_ib, main="Illes Balears", xlab="Any", ylab="Despeses mensuals en €")
+```
+
+
+Les dades van des d'octubre de 2015 a novembre de 2022 (llavors tenim 7 cicles complets). Podem observar que l'efecte de la COVID és veu clarament en 2020.
+
+Per veure millor l'estacionalitat de la sèrie visualitzem cada període mensualment:
+
+```{r}
+seasonplot(serie_ib, col=c("brown", "blue","red", "orange", "pink", "purple", "yellow","green"),year.labels=TRUE, main="Estacionalitat de les Illes Balears", xlab="Mes", ylab=" Despeses en €")
+
+legend("bottomright",
+       legend = c(2015, 2016, 2017, 2018, 2019, 2020, 2021, 2022),
+       fill =  c("brown", "blue","red", "orange", "pink", "purple", "yellow","green"),      
+       border = "black") 
+```
+
+Observam que efectivament, així com es comenta en el treball, el període de confinament va ser de principi de març, on comença a decréixer el valor dels preus, fins a finals de juny, on pareix que s'han tornat a recuperar els valors anteriors a la COVID.
+
+Dividirem la sèrie en tres trams:
+
+- Des de 10-2015 fins 12-2018 (*serie1_ib*), amb el que predirem un període. És a dir predirem de 1-2019 a 12-2019. (amb aquest comprovam que els mètodes funcionen)
+
+- Des de 10-2015 fins 12-2019 (*serie2_ib*), amb la que predirem el període de la COVID (és a dir, l'any 2020)
+
+- Des de 10-2015 fins 12-2020 (*serie3_ib*), amb la que predirem el períodes després de la COVID (és a dir, l'any 2021)
+
+Visualitzem-los:
+
+```{r}
+serie1_ib <- ts(ib$y[1:39],start=c(2015,10),frequency = 12)
+serie2_ib <- ts(ib$y[1:51],start=c(2015,10),frequency = 12)
+serie3_ib <- ts(ib$y[1:63],start=c(2015,10),frequency = 12)
+
+par(mfrow=c(2,2), mar=c(4,4,4,1)+.1)
+plot.ts(serie1_ib, main="Sèrie abans de la COVID \n menys un cicle", xlab="Any", ylab="despeses mensuals")
+plot.ts(serie2_ib, main="Sèrie abans de la COVID", xlab="Any", ylab="despeses mensuals")
+plot.ts(serie3_ib, main="Sèrie abans i durant de la COVID", xlab="Any", ylab="despeses mensuals")
+plot.ts(serie_ib, main="Sèrie completa", xlab="Any", ylab="despeses mensuals")
+
+```
+
+<br>´
+
+## **2. AJUST DELS MODELS:**
+
+Abans d'aplicar algun model, estudiem un poc la sèrie:
+
+```{r}
+serie_ib.lm <- lm(y~x, data=ib) 
+
+plot.ts(ib$y, main = "Illes Balears", ylab = "Despeses mensuals en €", xlab="Índex de cada mes")
+
+#dibuixam la recta de regressió sobre els punts
+abline(serie_ib.lm, col='red')
+
+summary(serie_ib.lm)$adj.r.squared
+```
+
+Si dibuixam la recta de regressió sobre les nostres dades, tot i que aquestes estan molt disperses i no s'ajusten bé a la recta, podem observar que la tendència és una mica creixent, encara que es manté més o menys constant. 
+
+
+```{r}
+boxplot(serie_ib~cycle(serie_ib), xlab = "mesos", ylab = "Despeses en €", main="Boxplot de les Illes Balears")
+```
+
+Podem observar també la presència d'estacionalitat, que prenen els seus valors màxims a la temporada d'estiu i els seus mínims en l'hivern, fet que corresponen amb les dades turístiques a les illes.
+
+Aplicarem diversos models per ajustar la nostra sèrie i fer-ne una predicció per llavors comparar quin és el millor.
+
+Vegem com actua cada model:
+
+<br>
+
+### **2.1. ABANS DE LA COVID**
+
+<br>
+
+####  - **REGRESSIÓ SEGMENTADA**
+  
+Com hem comentat anteriorment la recta de regressió no s'ajusta bé a les dades, de fet el valor del $R^2$ és molt baix:
+```{r}
+serie1_ib.lm <- lm(y~x, data=ib[1:39,]) 
+
+plot.ts(ib[1:39,]$y, main = "Illes Balears abans de la COVID", ylab = "Despeses mensuals en €", xlab="Índex de cada mes")
+abline(serie1_ib.lm, col="red")
+
+summary(serie1_ib.lm)$adj.r.squared
+```
+
+Per això utilitzam el paquet `segmented` per ajustar a una recta de regressió a trossos.
+
+Anem a utilitzar la funció `selgmented()` per veure quants de punts de canvi detecta:
+
+```{r}
+punts_canvi_serie1_ib <-selgmented(serie1_ib.lm, Kmax = 10, type="bic")
+```
+
+Aplicam la funció `segmented()` que ens calcula la regressió segmentada:
+```{r}
+serie1_ib.seg <- segmented(serie1_ib.lm, seg.Z=~x, psi = c(5,8,16,21,28,34))
+```
+
+Aquesta funció ens demana que introduïm els valors on es troben els punts de canvi, i aquesta ens dóna el valor estimat. Aquests punts de canvi són:
+
+```{r}
+summary(serie1_ib.seg)$psi
+```
+
+Que corresponen, aproximadament, a: 3-2016, 8-2016, 1-2017, 8-2017, 1-2018 i 8-2018. 
+
+Obtenim que el valor de $R^2$ per a la regressió segmentada és bastant alt
+```{r}
+summary(serie1_ib.seg)$adj.r.squared
+```
+
+Anem a visualitzar la regressió segmentada damunt les nostres dades:
+
+```{r}
+#Per graficar-ho
+
+p_serie1_ib <- ggplot(ib[1:39,], aes(x=x, y=y)) + 
+  geom_line() + #dibuixam les nostres dades en línia contínua
+  ggtitle('Regressió lineal i segmentada sobre les dades \nde les Illes Balears abans de la COVID') + 
+  xlab('Índex del mes') + 
+  ylab('Despeses mensuals en €') +
+  ylim(c(500,1200))
+
+my.coef1_ib <- coef(serie1_ib.lm) #coeficients de la recta de regressió lineal
+
+p_serie1_ib <- p_serie1_ib + geom_abline(intercept=my.coef1_ib[1], slope=my.coef1_ib[2], color="green") #afegim la recta de regressió lineal
+
+my.model1_ib <- data.frame(x=1:39, y=fitted(serie1_ib.seg)) #model nou amb els valors ajustats de la regressió segmentada
+
+
+p_serie1_ib <- p_serie1_ib + geom_line(data=my.model1_ib, aes(x=x,y=y), colour="red") #afegim la recta de regressió segmentada
+
+my.lines1_ib <- serie1_ib.seg$psi[,2]# guardam on estan els punts de canvi estimats
+
+p_serie1_ib <- p_serie1_ib + geom_vline(xintercept=my.lines1_ib, linetype="dashed") #línies verticals en els punts de canvi
+
+p_serie1_ib <- p_serie1_ib + theme(panel.background = element_blank()) +  geom_vline(xintercept=0) + geom_hline(yintercept=500) #eliminam el fons i la quadrícula del gràfic
+
+ggplotly(p_serie1_ib)
+```
+
+Visualment també es pot observar que la recta de regressió segmentada s'ajusta millor a les nostres dades.
+
+Anem a calcular les equacions d'aquestes rectes, sabem que les rectes tenen la forma $y=mx+n$, on $m$ és la pendent i $n$ el valor de tall de l'eix y. 
+
+Hi ha una funció del paquet `segmented` que ens dona aquesta valors de $n$:
+
+```{r}
+intercept(serie1_ib.seg)
+```
+
+També tenim una altra funció que ens calcula les pendents:
+```{r}
+slope(serie1_ib.seg)
+```
+
+Aleshores, la nostra recta segmentada és:
+
+$\hat{y}= \left\{ \begin{array}{lcc}
+                -28.147x +  888.18 &   si  & x \leq \psi_1 \\
+             \\ 61.003x + 390.98 &  si & \psi_1 < x \leq \psi_2 \\
+             \\ -67.495x + 1769.30 &  si & \psi_2 < x \leq \psi_3 \\
+             \\ 69.522x - 472.63 &  si & \psi_3 < x \leq \psi_4 \\
+             \\ -78.019x + 2893.20 &  si & \psi_4 < x \leq \psi_5 \\
+             \\ 57.015x - 893.03 &  si & \psi_5 < x \leq \psi_6 \\
+             \\ -86.194x + 4119.30 &  si & \psi_6 < x \\
+             \end{array}
+   \right.$
+
+on $\psi_1= 5.58$, $\psi_2= 10.73$, $\psi_3= 16.36$, $\psi_4=22.81$, $\psi_5= 28.04$ i  $\psi_6= 35$.
+
+Vegem els errors del model (ens interessa el RMSE):
+```{r}
+accuracy(serie1_ib.seg)
+```
+
+Anem a fer la predicció de 1-2019 a 12-2019. 
+
+El darrer punt de canvi que tenim és en agost de 2018 i sabem, seguint el patró obtingut amb les dades d’entrenament, que els següents és donaran en gener de 2019, agost de 2019 i gener de 2020. Necessitam calcular les pendents de les rectes d’entre agost de 2018 i gener de 2020, per poder fer la predicció i calcular l’error.
+
+Per calcular les pendents de les noves rectes farem la mitjana de les pendents anteriors. De les pendents ja calculades en el model obviarem la primera i la darrera, ja que no són vàlides. Per tant,
+
+- La pendent de 8-2018 a 1-2019 i de 8-2019 a 1-2020 serà : (-67.495 - 78.019)/2 = -72.757
+
+- La pendent de 1-2019 a 8-2019 serà : (61.003 + 69.522 + 57.015)/3 = 62.513.
+
+Ara, seguint el mateix procediment que en el cas de Mallorca, els nous punts d'intersecció són: 3648.99, -1761.81 i 4595.88.
+
+Llavors l'equació per a la predicció és:
+
+$\hat{y}= \left\{ \begin{array}{lcc}
+                -72.757x + 3648.99 &   si  & x \leq \psi_7 \\
+             \\ 62.513x - 1761.81 &  si & \psi_7 < x \leq \psi_8 \\
+             \\ -72.757x + 4595.88&  si & \psi_8 < x \\
+             \end{array}
+   \right.$
+   
+on $\psi_7 = 40$ i $\psi_8 = 47$.
+
+```{r}
+# Per graficar-ho
+
+p1_serie_ib <- ggplot(ib[1:51,], aes(x=x, y=y)) + geom_line()+ #dibuixam les nostres dades en línia contínua
+  ggtitle('Predicció de les Illes Balears amb el model \nde regressió segmentada abans de la COVID') + 
+  xlab('Índex del mes') + 
+  ylab('Despeses mensuals en €')+
+  ylim(c(500,1300))
+
+my.model1_ib <- data.frame(x=1:39, y=fitted(serie1_ib.seg)) #model nou amb els valors ajustats de la regressió segmentada
+
+p1_serie_ib <- p1_serie_ib + geom_line(data=my.model1_ib, aes(x=x,y=y), colour="red") #afegim la recta de regressió segmentada
+
+my.lines1_ib <- serie1_ib.seg$psi[,2]# guardam on estan els punts de canvi estimats
+
+p1_serie_ib <- p1_serie_ib + geom_vline(xintercept=my.lines1_ib, linetype="dashed") #línies verticals en els punts de canvi
+
+p1_serie_ib <- p1_serie_ib + geom_vline(xintercept=0) + geom_hline(yintercept=500) + theme(panel.background = element_blank()) #eliminam el fons i la quadrícula del gràfic
+
+p1_serie_ib <- p1_serie_ib + geom_abline(intercept = 3648.99, slope=-72.757, colour="green") +
+                geom_abline(intercept = -1761.81, slope=62.513, colour="blue") +
+                geom_abline(intercept = 4595.88, slope=-72.757, colour="orange")
+
+ggplotly(p1_serie_ib)
+```
+
+Calculem l'error de la predicció:
+
+```{r}
+o1_ib<-c(serie_ib[40:51]) #observacions reals de la sèrie de gener de 2019 a desembre de 2019
+
+v1_ib=c(40:47)
+f1_ib <- sapply(v1_ib, function(x) 62.513*x-1761.81) #predicció de gener de 2019 a agost 2019
+
+v2_ib=c(48:51)
+f2_ib <- sapply(v2_ib, function(x) -72.757*x + 4595.88 )#predicció de setembre de 2019 a desembre de 2019
+
+p1_ib <- c(f1_ib,f2_ib) #predicció de gener de 2019 a desembre de 2019
+
+sqrt(sum((p1_ib-o1_ib)^2)/12) #error de la predicció
+```
+
+<br>
+
+####  - **DECOMPOSE**
+  
+Recordem la sèrie
+```{r}
+plot.ts(serie1_ib, main= "Illes Balears abans de la COVID", xlab="Any", ylab="Despeses mensuals en €")
+```
+
+Ja hem dit anteriorment que té una tendència mínima i podem observar també que no hi ha variabilitat.
+
+El mètode clàssic de descomposició separa la sèrie en subseries corresponents a la tendència, la estacionalitat i el renou.
+
+Aquestes components es poden combinar de manera additiva o multiplicativa. En el nostre cas utilitzam el model additiu: $y_t = \mu_t + S_t + a_t$
+
+```{r}
+decompose_s1_ib <-decompose(serie1_ib)
+plot(decompose_s1_ib, xlab="Any")
+```
+
+El `decompose`, per calcular aquestes noves tendències, el que fa és agafar les sis tendències anteriors i les sis posteriors de la sèrie original i en fa la mitjana. És per això que la primera que obtenim és en abril de 2016 i la darrera en juny de 2018. Notem que per a la predicció ens quedarem amb el valor de la darrera tendència del `decompose`.
+
+```{r}
+t1_ib <- decompose_s1_ib$trend #tendències de la sèrie sense el tros a predir abans de la COVID
+t1_ib
+```
+
+
+Els valors de les components estacionals els calcula fent la mitjana per mesos, és a dir, per calcular la componen de gener, agafa els valors de tots els geners que tenim a la sèrie original i en fa la mitjana. Per tant, només tenim 12 valors, un per a cada mes.
+
+```{r}
+s1_ib <- decompose_s1_ib$seasonal
+s1_ib <-  s1_ib[4:15] #estacionalitat de gener a desembre
+s1_ib
+```
+
+Anem a fer la predicció d'aquest model
+```{r}
+a1_ib <- c(s1_ib[7:12],s1_ib) #estacionalitat de juliol 2018 a desembre 2019 (es per poder fer la predicció)
+
+pred1_decompose_ib <- sapply(a1_ib, function(x) 899.1221 + x) #predicció de juliol de 2018 a desembre 2019 (el valor 899.1221 és la darrera tendència obtinguda amb el decompose)
+```
+
+
+```{r}
+p1_dec_ib<-c(serie1_ib[1:33], pred1_decompose_ib) #valors de la sèrie original més els predits
+
+A1_ib<- data.frame("x" = ib[1:51,]$x, "y" = ib[1:51,]$y, "p"= p1_dec_ib) #cream un data frame on hi trobam una columna amb els mesos, x, una amb els valors originals de la sèrie, y, i una altra amb les prediccions, p.
+
+#Ho dibuixam
+
+grafica1_ib_dec <- ggplot(A1_ib)+
+  geom_line(aes(x,p), color="red")+
+  geom_line(aes(x,y))+ geom_vline(xintercept=0) + geom_hline(yintercept=0)+ 
+  labs(title="Predicció de les Illes Balears abans de la COVID amb el model \nde descomposició", x="Índex del mes", y="Despeses mensuals en €") +
+  theme(panel.background = element_blank())
+
+grafica1_ib_dec
+```
+
+Podem observar que aquest model fa una predicció bastant bona. No obstant això observam que, com el quart cicle és un poc més alt que els anteriors, la predicció no arriba a captar els valors més alts del darrer cicle.
+
+Calculem l'error de la predicció:
+
+(Notem que la predicció és des de juliol de 2018 a desembre de 2019 i per calcular l’error només volem de gener de 2019 a desembre de 2019.)
+
+```{r}
+sqrt(sum((c(serie_ib[40:51]- pred1_decompose_ib[7:18]))^2)/12) #error predicció de gener a desembre de 2019
+```
+
+Aleshores l’error que és comet amb el model clàssic de descomposició és de 32 euros, aproximadament.
+
+<br>
+
+Notem que també tenim una altra instrucció a R per fer prediccions d’una sèrie, la funció `predict()`. Aquesta és basa en un model ETS, anem a veure la predicció:
+
+```{r}
+prediccio1_ib <- predict(serie1_ib,h=12)
+plot(prediccio1_ib, xlab="Any", ylab="Despeses mensuals en €")
+```
+
+Pareix que la predicció és bastant bona, ja que el cicle predit segueix un mateix patró que els anteriors. Anem a veure la predicció juntament amb la sèrie original:
+
+```{r}
+df_prediccio1_ib <- data.frame(prediccio1_ib)
+
+p1_ets_ib <- data.frame("x"= 1:51, "PointForecast"=c(serie1_ib,df_prediccio1_ib$Point.Forecast), "Lo80" = c(rep(NA,39),df_prediccio1_ib$Lo.80), "Hi80" = c(rep(NA,39),df_prediccio1_ib$Hi.80), "Lo95" = c(rep(NA,39),df_prediccio1_ib$Lo.95),"Hi95" = c(rep(NA,39),df_prediccio1_ib$Hi.95))
+
+grafica_pred1_ets <- ggplot((ib[1:51,]))+
+  geom_ribbon(data = p1_ets_ib, aes(x, ymin = Lo95, ymax = Hi95), fill = "blue", alpha = 0.25) +
+  geom_ribbon(data =p1_ets_ib, aes(x, ymin = Lo80, ymax = Hi80), fill = "blue", alpha = 0.25) +
+  geom_line(data = p1_ets_ib, aes(x, PointForecast), colour = "blue") +
+  geom_line(aes(x,y), color="red")+
+  labs(title="Predicció del model ETS(M,N,M) a les Illes Balears \nabans de la COVID", x="Índex del mes", y="Despeses mensuals en €") + 
+  geom_vline(xintercept=0) + geom_hline(yintercept=0)+ theme(panel.background = element_blank())
+
+grafica_pred1_ets
+```
+
+Podem observar que la predicció és bastant bona, ja que continua seguint un mateix patró. I l’error comés és d'uns 39 euros.
+
+```{r}
+accuracy(prediccio1_ib,serie2_ib)
+```
+
+<br>
+
+####  - **SARIMA**
+
+Anem a veure quin model obtenim considerant un model estacional.
+
+Pel que hem vist anteriorment, podem considerar que no hi ha tendència, llavors no fa falta fer cap diferència a la part regular, no obstant, sí que cal fer una diferenciació d'orde 12. Vegem l'ACF i el PACF de la sèrie a predir:
+
+```{r}
+par(mfrow=c(1,2))
+acf(serie1_ib)
+pacf(serie1_ib)
+```
+
+Per a la part regular obtenim un ARIMA(1,0,2). Ara feim una diferenciació a la part estacional, és a dir, d'ordre 12:
+
+```{r}
+serie1_ib_dif <- diff(serie1_ib,12)
+plot(serie1_ib_dif, main="Sèrie sense estacionalitat", xlab="Any", ylab="Sèrie diferenciada")
+```
+
+Aquesta és la sèrie sense estacionalitat ni tendència, vegem com es modifiquen l'ACF i el PACF.
+
+```{r}
+par(mfrow=c(2,1))
+acf(serie1_ib_dif, lag=24)
+pacf(serie1_ib_dif,lag=24)
+```
+
+Per a la part estacional obtenim que P=1, D=1 i Q=2.
+
+És a dir, hem obtingut un ARIMA(1,0,2)(1,1,2)[12], vegem quin model els proposa R:
+```{r}
+auto.arima(serie1_ib)
+```
+
+R ens proposa un ARIMA(1,0,0)(0,1,0)[12]. Per tant les propostes de model ARIMA són:
+```{r}
+model1_ib<-arima(serie1_ib, order=c(1,0,2), seasonal = list(order=c(1,1,2), period=12))
+
+model2_ib <- arima(serie1_ib, order=c(1,0,0), seasonal = list( order=c(0,1,0), period=12))
+```
+
+Amb uns errors de 26.23 i 28.20 cada un.
+
+```{r}
+accuracy(model1_ib)
+accuracy(model2_ib)
+```
+
+Anem a fer la predicció de 2019 d'aquests models:
+
+```{r}
+#ens torna un data frame amb els punts predits, un interval del 80% i un altre del 95%
+fc_m1_ib <-forecast(model1_ib, h=12)
+fc_m2_ib <- forecast(model2_ib,h=12)
+```
+
+Visualitzem-les:
+
+```{r}
+# Model 1
+pre1_ib <- data.frame("Point Forecast" = serie1_ib, "Lo 80" = rep(NA,39), "Hi 80"=  rep(NA,39), "Lo 95" =  rep(NA,39), "Hi 95" =  rep(NA,39)) #dades abans de la predicció amb NA als intervals ja que només els volem per la predicció
+ 
+pred_m1_ib <-data.frame(fc_m1_ib) 
+
+grafica_m1_ib <- data.frame("x" = 1:51, "PointForecast" = c(pre1_ib$Point.Forecast,pred_m1_ib$Point.Forecast), "Lo80" = c(pre1_ib$Lo.80, pred_m1_ib$Lo.80), "Hi80"= c(pre1_ib$Hi.80, pred_m1_ib$Hi.80), "Lo95" = c(pre1_ib$Lo.95, pred_m1_ib$Lo.95), "Hi95" = c(pre1_ib$Hi.95, pred_m1_ib$Hi.95))
+
+grafica1_ib <- ggplot(ib[1:51,])+
+  geom_ribbon(data = grafica_m1_ib, aes(x, ymin = Lo95, ymax = Hi95), fill = "blue", alpha = 0.25) +
+  geom_ribbon(data = grafica_m1_ib, aes(x, ymin = Lo80, ymax = Hi80), fill = "blue", alpha = 0.25) +
+  geom_line(data = grafica_m1_ib, aes(x, PointForecast), colour = "blue") +
+  geom_line(aes(x,y), color="red")+
+  labs(title="Predicció de les Illes Balears amb el model ARIMA(1,0,2)(1,1,2)[12] \nabans de la COVID", x="Índex del mes", y="Despeses mensuals en €") + 
+  geom_vline(xintercept=0) + geom_hline(yintercept=0) + theme(panel.background = element_blank())
+
+grafica1_ib
+```
+
+```{r}
+#Model 2
+pred_m2_ib <-data.frame(fc_m2_ib)
+
+grafica_m2_ib <- data.frame("x" = 1:51, "PointForecast" = c(pre1_ib$Point.Forecast,pred_m2_ib$Point.Forecast), "Lo80" = c(pre1_ib$Lo.80, pred_m2_ib$Lo.80), "Hi80"= c(pre1_ib$Hi.80, pred_m2_ib$Hi.80), "Lo95" = c(pre1_ib$Lo.95, pred_m2_ib$Lo.95), "Hi95" = c(pre1_ib$Hi.95, pred_m2_ib$Hi.95))
+
+grafica2_ib <- ggplot(ib[1:51,])+
+  geom_ribbon(data = grafica_m2_ib, aes(x, ymin = Lo95, ymax = Hi95), fill = "blue", alpha = 0.25) +
+  geom_ribbon(data = grafica_m2_ib, aes(x, ymin = Lo80, ymax = Hi80), fill = "blue", alpha = 0.25) +
+  geom_line(data = grafica_m2_ib, aes(x, PointForecast), colour = "blue") +
+  geom_line(aes(x,y), color="red")+
+labs(title="Predicció de les Illes Balears amb el model ARIMA (1,0,0)(0,1,0)[12] \nabans de la COVID", x="Índex del mes", y="Despeses mensuals en €") + 
+  geom_vline(xintercept=0) + geom_hline(yintercept=0) + theme(panel.background = element_blank())
+
+grafica2_ib
+```
+
+Vegem i estudiem els errors de la predicció:
+```{r}
+
+accuracy(fc_m1_ib, serie_ib[40:51], h=12)
+accuracy(fc_m2_ib, serie_ib[40:51], h=12)
+
+checkresiduals(fc_m1_ib)
+checkresiduals(fc_m2_ib)
+
+par(mfrow=c(1,2))
+qqPlot(fc_m1_ib$residuals,id=FALSE, mean=mean(fc_m1_ib$residuals), sd=sd(fc_m1_ib$residuals))
+
+qqPlot(fc_m2_ib$residuals,id=FALSE, mean=mean(fc_m2_ib$residuals), sd=sd(fc_m2_ib$residuals))
+
+shapiro.test(fc_m1_ib$residuals)
+shapiro.test(fc_m2_ib$residuals)
+
+lillie.test(fc_m1_ib$residuals)
+lillie.test(fc_m2_ib$residuals)
+```
+
+<br>
+
+Resum dels errors que cometen cada un dels models anteriors:
+
+|                     | reg. segmentada | descomposició clàssica | ETS(M,N,M) | ARIMA (1,0,2)(1,1,2)[12] | ARIMA (1,0,0)(0,1,0)[12] |
+|---------------------|:---------------:|:----------------------:|:----------:|:------------------------:|:------------------------:|
+| **error model**     |       37.3      |                        |    22.82   |           26.23          |           28.10          |
+| **error predicció** |      78.33      |          31.75         |    39.4    |           28.9           |           29.85          |
+
+<br>
+
+### **2.2. DURANT LA COVID**
+
+<br>
+
+#### - **REGRESSIÓ SEGMENTADA**
+
+El valor de $R^2$ per a la regressió lineal és:
+```{r}
+serie2_ib.lm <- lm(y~x, data= ib[1:51,])
+summary(serie2_ib.lm)$adj.r.squared
+```
+
+Aleshores utilitzem el paquet `segmented` per ajustar les nostres dades a una regressió lineal segmentada i millorar aquest valor.
+
+Vegem els punts de canvi:
+```{r}
+punts_canvi_serie2_ib <-selgmented(serie2_ib.lm, Kmax = 10, type="bic")
+```
+
+```{r}
+serie2_ib.seg <- segmented(serie2_ib.lm, seg.Z=~x, psi = c(5,10,14,21,29,35,40,47))
+summary(serie2_ib.seg)$psi
+```
+
+Aquests són en: 3-2016, 8-2016, 1-2017, 8-2017, 1-2018, 8-2018, 1-2019, 8-2019.
+
+Ara el valor de $R^2$ de la segmentada és
+```{r}
+summary(serie2_ib.seg)$adj.r.squared
+```
+
+Anem a visualitzar la regressió segmentada damunt les nostres dades:
+```{r}
+p_serie2_ib <- ggplot(ib[1:51,], aes(x=x, y=y)) + geom_line()+  #dibuixam les nostres dades en línia contínua
+  ggtitle('Regressió lineal i segmentada sobre les dades \nde les Illes Balears durant la COVID') + 
+  xlab('índex del mes')+ 
+  ylab('Despeses mensuals en €') + 
+  ylim(c(0,1300))
+
+my.coef2_ib <- coef(serie2_ib.lm) #coeficients de la recta de regressió lineal
+
+p_serie2_ib <- p_serie2_ib + geom_abline(intercept=my.coef2_ib[1], slope=my.coef2_ib[2], color="green") #afegim la recta de regressió lineal
+
+my.model2_ib <- data.frame(x=1:51, y=fitted(serie2_ib.seg)) #model nou amb els valors ajustats de la regressió segmentada
+
+p_serie2_ib <- p_serie2_ib + geom_line(data=my.model2_ib, aes(x=x,y=y), colour="red") #afegim la recta de regressió segmentada
+
+my.lines2_ib <- serie2_ib.seg$psi[,2]# guardam on estan els punts de canvi estimats
+
+p_serie2_ib <- p_serie2_ib + geom_vline(xintercept=my.lines2_ib, linetype="dashed") #línies verticals en els punts de canvi
+
+p_serie2_ib <- p_serie2_ib +  geom_vline(xintercept=0) + geom_hline(yintercept=0) + theme(panel.background = element_blank())
+
+ggplotly(p_serie2_ib)
+```
+
+Per poder escriure la funció necessitam les pendents i els punts d'intersecció amb l'eix OY, que ens ho donen les següents funcions:
+
+```{r}
+# PENDENTS
+slope(serie2_ib.seg)
+
+#PUNTS D'INTERSECCIÓ
+intercept(serie2_ib.seg)
+```
+
+L'error del model de regressió segmentada és (ens interessa el RMSE):
+```{r}
+accuracy(serie2_ib.seg)
+```
+
+Anem a fer la predicció, igual que abans els següents punts de canvi es donen en gener, agost i gener, aleshores:
+
+- La pendent de 8-2019 a 1-2020 i de 8-2020 a 1-2021 serà: (-67.919 - 77.927 -81.755)/3 = -75.867
+- La pendent de 1-2020 a 8-2020 serà : (61.140 + 69.157 + 56.093 + 75.459)/4 = 65.46
+
+Seguin el mateix procediment que amb les dades de Mallorca, els nous punts d'intersecció són 4708.96, -2640.15 i 5698.15.
+
+És a dir, la funció per a la predicció de 2020 és:
+
+$\hat{y}= \left\{ \begin{array}{lcc}
+                -75.867x + 4708.96 &   si  & x \leq \psi_9 \\
+             \\ 65.46x - 2640.15 &  si & \psi_9 < x \leq \psi_{10} \\
+             \\ -75.867x + 5698.15 &  si & \psi_{10} < x \\
+             \end{array}
+   \right.$
+   
+on $\psi_9 = 52$ i $\psi_8 = 59$.
+```{r}
+#ho graficam
+
+p2_serie_ib <- ggplot(ib, aes(x=x, y=y)) + geom_line()+
+  ggtitle('Predicció de les Illes Balears amb el model \nde regressió segmentada durant la COVID') + 
+  xlab('Índex del mes') + 
+  ylab('Despeses mensuals en €') +
+  ylim(c(0,1300)) 
+  
+my.model2_ib <- data.frame(x=1:51, y=fitted(serie2_ib.seg)) #model nou amb els valors ajustats de la regressió segmentada
+
+p2_serie_ib <- p2_serie_ib + geom_line(data=my.model2_ib, aes(x=x,y=y), colour="red") #afegim la recta de regressió segmentada
+
+my.lines2_ib <- serie2_ib.seg$psi[,2]# guardam on estan els punts de canvi estimats
+
+p2_serie_ib <- p2_serie_ib + geom_vline(xintercept=my.lines2_ib, linetype="dashed") #línies verticals en els punts de canvi
+
+p2_serie_ib <- p2_serie_ib + geom_vline(xintercept=0) + geom_hline(yintercept=0)+ theme(panel.background = element_blank()) #eliminam el fons i la quadrícula del gràfic
+
+p2_serie_ib <- p2_serie_ib + geom_abline(intercept = 4708.96, slope=-75.867, colour="green") +
+                geom_abline(intercept = -2640.15 , slope=65.46, colour="blue") +
+                geom_abline(intercept = 5698.15 , slope=-75.867, colour="orange")
+
+ggplotly(p2_serie_ib)
+```
+
+Calculem l'error de la predicció:
+
+```{r}
+o2_ib<-c(serie_ib[52:63]) # dades reals per fer predicció del 2020
+
+v3_ib=c(52:59)
+f3_ib <- sapply(v3_ib, function(x) 65.46*x-2640.15) #predicció de gener 2020 a agost 2020
+
+v4_ib=c(60:63)
+f4_ib <- sapply(v4_ib, function(x) -75.867*x + 5698.15) #predicció de setembre 2020 a desembre 2020
+
+p2_ib <- c(f3_ib,f4_ib) #predicció de 2020
+
+sqrt(sum((p2_ib-o2_ib)^2)/12)
+```
+
+<br>
+
+#### - **DECOMPOSE**
+
+La descomposició de la sèrie en aquest cas és la següent
+```{r}
+decompose_s2_ib <- decompose(serie2_ib)
+plot(decompose_s2_ib, xlab="Any")
+```
+
+On les components de tendència són:
+```{r}
+t2_ib <- decompose_s2_ib$trend #tendències de la sèrie sense el tros a predir abans de la COVID
+t2_ib
+```
+
+I les estacionals:
+```{r}
+s2_ib <- decompose_s2_ib$seasonal #estacionalitat
+s2_ib <-  s2_ib[4:15] #estacionalitat de gener a desembre
+s2_ib
+```
+
+Fem la predicció:
+
+```{r}
+a2_ib <- c(s2_ib[7:12],s2_ib) #estacionalitat de juliol 2019 a desembre 2029 (es per poder fer la predicció)
+
+pred2_decompose_ib <- sapply(a2_ib, function(x) 904.9629 + x) #predicció de juliol de 2019 a desembre 2020
+
+p2_dec_ib <-c(serie2_ib[1:45], pred2_decompose_ib)
+
+A2_ib<- data.frame("x" = ib[1:63,]$x, "y" = ib[1:63,]$y, "p"= p2_dec_ib)
+
+grafica2_ib_dec <- ggplot(A2_ib)+
+  geom_line(aes(x,p), color="red")+
+  geom_line(aes(x,y))+
+  labs(title="Predicció de les Illes Balears durant la COVID amb el model \nde descomposició", x="Índex del mes", y="Despesese mensuals en €")+
+  geom_vline(xintercept = 0)+ geom_hline(yintercept = 0)+ theme(panel.background = element_blank())
+
+grafica2_ib_dec
+```
+
+L'error que es comet és:
+```{r}
+sqrt(sum((c(serie_ib[52:63]- pred2_decompose_ib[7:18]))^2)/12)
+```
+
+<br>
+
+Vegem, igual que abans, la predicció amb la funció `predict()`:
+
+```{r}
+prediccio2_ib <- predict(serie2_ib,h=12)
+plot(prediccio2_ib, xlab="Any", ylab ="Despeses menusals en €")
+```
+
+Vegem com queda la predicció sobre la sèrie original:
+
+```{r}
+df_prediccio2_ib <- data.frame(prediccio2_ib)
+p2_ets_ib <- data.frame("x"= 1:63, "PointForecast"=c(serie2_ib,df_prediccio2_ib$Point.Forecast), "Lo80" = c(rep(NA,51),df_prediccio2_ib$Lo.80), "Hi80" = c(rep(NA,51),df_prediccio2_ib$Hi.80), "Lo95" = c(rep(NA,51),df_prediccio2_ib$Lo.95),"Hi95" = c(rep(NA,51),df_prediccio2_ib$Hi.95))
+
+grafica_pred2_ets <- ggplot((ib[1:63,]))+
+  geom_ribbon(data = p2_ets_ib, aes(x, ymin = Lo95, ymax = Hi95), fill = "blue", alpha = 0.25) +
+  geom_ribbon(data =p2_ets_ib, aes(x, ymin = Lo80, ymax = Hi80), fill = "blue", alpha = 0.25) +
+  geom_line(data = p2_ets_ib, aes(x, PointForecast), colour = "blue") +
+  geom_line(aes(x,y), color="red")+
+  labs(title="Predicció del model ETS(A,N,A) a les Illes Balears durant la COVID", y="Despeses mensuals en €", x="Índex del mes") + 
+  geom_vline(xintercept = 0) + geom_hline(yintercept = 0)+ theme(panel.background = element_blank())
+
+grafica_pred2_ets
+```
+
+Si calculam l’error comés, aquest és d'uns 379 euros.
+```{r}
+accuracy(prediccio2_ib, serie3_ib)
+```
+
+<br>
+
+#### - **SARIMA**
+
+Quin model proposam nosaltres? Vegem l'ACF i el PACF.
+
+```{r}
+par(mfrow=c(1,2))
+acf(serie2_ib)
+pacf(serie2_ib)
+```
+
+Per a la part regular obtenim que p=1, q=2 i d=0.
+
+Observam que hi ha estacionalitat, llavors feim una diferenciació d'ordre 12.
+```{r}
+serie2_ib_diff <- diff(serie2_ib,12)
+plot(serie2_ib_diff, main="Sèrie sense estacionalitat", xlab="Any", ylab="Sèrie diferenciada")
+```
+
+Ara ja no s'observa l'estacionalitat, llavors hem de fer una diferenciació D=1. Vegem quins són els nous ACF i PACF.
+```{r}
+par(mfrow=c(1,2))
+acf(serie2_ib_diff,lag=36)
+pacf(serie2_ib_diff,lag=36)
+```
+
+Obtenim que P=1 i Q=2.Per tant, el model que nosaltres proposam es un ARIMA(1,0,2)(1,1,2)[12].
+
+R proposa el següent model:
+```{r}
+auto.arima(serie2_ib)
+```
+
+Els dos models que tenim són: 
+```{r}
+model3_ib <- arima(serie2_ib, order=c(1,0,2), seasonal = list(order=c(1,1,2), period=12))
+
+model4_ib <- arima(serie2_ib, order=c(1,0,0), seasonal = list( order=c(1,1,0), period=12))
+```
+
+I els seus errors
+```{r}
+accuracy(model3_ib)
+accuracy(model4_ib)
+```
+
+Les prediccions són:
+```{r}
+fc_m3_ib <- forecast(model3_ib, h=12)
+fc_m4_ib <- forecast(model4_ib,h=12)
+```
+
+```{r}
+# primer model
+pre2_ib <- data.frame("Point Forecast" = serie2_ib, "Lo 80" =  rep(NA,51), "Hi 80"= rep(NA,51), "Lo 95" = rep(NA,51), "Hi 95" = rep(NA,51))
+
+pred_m3_ib <-data.frame(fc_m3_ib)
+
+grafica_m3_ib <- data.frame("x" = 1:63, "PointForecast" = c(pre2_ib$Point.Forecast,pred_m3_ib$Point.Forecast), "Lo80" = c(pre2_ib$Lo.80, pred_m3_ib$Lo.80), "Hi80"= c(pre2_ib$Hi.80, pred_m3_ib$Hi.80), "Lo95" = c(pre2_ib$Lo.95, pred_m3_ib$Lo.95), "Hi95" = c(pre2_ib$Hi.95, pred_m3_ib$Hi.95))
+
+
+grafica3_ib <- ggplot(ib[1:63,])+
+  geom_ribbon(data = grafica_m3_ib, aes(x, ymin = Lo95, ymax = Hi95), fill = "blue", alpha = 0.25) +
+  geom_ribbon(data = grafica_m3_ib, aes(x, ymin = Lo80, ymax = Hi80), fill = "blue", alpha = 0.25) +
+  geom_line(data = grafica_m3_ib, aes(x, PointForecast), colour = "blue") +
+  geom_line(aes(x,y), color="red")+
+  labs(title="Prediccó  de les Illes Balears amb el model ARIMA (1,0,2)(1,1,2)[12] \ndurant la COVID", x="Índex del mes", y="Despeses mensuals en €") +
+  geom_vline(xintercept=0) + geom_hline(yintercept=0) + theme(panel.background = element_blank())
+
+grafica3_ib
+```
+
+
+```{r}
+# segon model
+pred_m4_ib <-data.frame(fc_m4_ib)
+
+grafica_m4_ib <- data.frame("x" = 1:63, "PointForecast" = c(pre2_ib$Point.Forecast,pred_m4_ib$Point.Forecast), "Lo80" = c(pre2_ib$Lo.80, pred_m4_ib$Lo.80), "Hi80"= c(pre2_ib$Hi.80, pred_m4_ib$Hi.80), "Lo95" = c(pre2_ib$Lo.95, pred_m4_ib$Lo.95), "Hi95" = c(pre2_ib$Hi.95, pred_m4_ib$Hi.95))
+
+grafica4_ib <- ggplot(ib[1:63,])+
+  geom_ribbon(data = grafica_m4_ib, aes(x, ymin = Lo95, ymax = Hi95), fill = "blue", alpha = 0.25) +
+  geom_ribbon(data = grafica_m4_ib, aes(x, ymin = Lo80, ymax = Hi80), fill = "blue", alpha = 0.25) +
+  geom_line(data = grafica_m4_ib, aes(x, PointForecast), colour = "blue") +
+  geom_line(aes(x,y), color="red")+
+  labs(title="Predicció de les Illes Balears amb el model ARIMA (1,0,0)(1,1,0)[12] \ndurant la COVID", x="Índex del mes", y="Despeses mensuals en €") +
+  geom_vline(xintercept=0) + geom_hline(yintercept=0) + theme(panel.background = element_blank())
+
+grafica4_ib
+```
+
+Vegem i estudiem els seus errors:
+```{r}
+accuracy(fc_m3_ib,serie_ib[52:63], h=12)
+accuracy(fc_m4_ib,serie_ib[52:63], h=12)
+
+checkresiduals(fc_m3_ib)
+checkresiduals(fc_m4_ib)
+
+par(mfrow=c(1,2))
+qqPlot(fc_m3_ib$residuals,id=FALSE, mean=mean(fc_m3_ib$residuals), sd=sd(fc_m3_ib$residuals))
+qqPlot(fc_m4_ib$residuals,id=FALSE, mean=mean(fc_m4_ib$residuals), sd=sd(fc_m4_ib$residuals))
+
+shapiro.test(fc_m3_ib$residuals)
+shapiro.test(fc_m4_ib$residuals)
+
+lillie.test(fc_m3_ib$residuals)
+lillie.test(fc_m4_ib$residuals)
+```
+
+<br>
+
+Resum dels errors que comet cada un del models anteriors:
+
+|                     | reg. segmentada | descomposició clàssica | ETS(A,N,A) | ARIMA (1,0,2)(1,1,2)[12] | ARIMA (1,0,0)(1,1,0)[12] |
+|---------------------|:---------------:|:----------------------:|:----------:|:------------------------:|:------------------------:|
+| **error model**     |      37.09      |                        |    24.47   |           21.2           |           26.63          |
+| **error predicció** |     464.8561    |         385.35         |   379.48   |          379.84          |          384.71          |
+
+<br>
+
+### **2.3. DESPRÉS DE LA COVID**
+
+<br>
+
+#### - **REGRESSIÓ SEGMENTADA**
+
+El valor de $R^2$ per a la regressió lineal és molt baix.
+```{r}
+serie3_ib.lm <- lm(y~x, data= ib[1:63,])
+summary(serie3_ib.lm)$adj.r.squared
+```
+
+Anem a fer ús del paquet `segmented`.
+
+Vegem els punts de canvi, que igual que al cas de Mallorca, en aquest cas ens indica que no n'hi ha:
+```{r}
+punts_canvi_serie3_ib <-selgmented(serie3_ib.lm, Kmax = 10, type="bic")
+```
+
+```{r}
+serie3_ib.seg <- segmented(serie3_ib.lm, seg.Z=~x, psi = c(5,9,16,21,28,35,40,45,54,59))
+summary(serie3_ib.seg)$psi
+```
+
+Ens queden els punts de canvi a: 3-2016, 8-2016, 1-2017, 8-2017, 1-2018, 8-2018, 1-2019, 8-2019, 5-2020, 7-2020
+
+Ara, el valor de $R^2$ de la segmentada és
+```{r}
+summary(serie3_ib.seg)$adj.r.squared
+```
+
+Anem a visualitzar la regressió segmentada damunt les nostres dades
+```{r}
+p_serie3_ib <- ggplot(ib[1:63,], aes(x=x, y=y)) + geom_line()+
+  ylim(c(0,1300)) +
+  ggtitle('Regressió lineal i segmentada sobre les dades de les \nIlles Balears després de la COVID') + 
+  xlab('índex del mes')+ 
+  ylab('Despeses mensuals en €')
+
+my.coef3_ib <- coef(serie3_ib.lm) #coeficients de la recta de regressió lineal
+
+p_serie3_ib <- p_serie3_ib + geom_abline(intercept=my.coef3_ib[1], slope=my.coef3_ib[2], color="green") #afegim la recta de regressió lineal
+
+my.model3_ib <- data.frame(x=1:63, y=fitted(serie3_ib.seg)) #model nou amb els valors ajustats de la regressió segmentada
+ 
+p_serie3_ib <- p_serie3_ib + geom_line(data=my.model3_ib, aes(x=x,y=y), colour="red") #afegim la recta de regressió segmentada
+
+my.lines3_ib <- serie3_ib.seg$psi[,2]# guardam on estan els punts de canvi estimats
+
+p_serie3_ib <- p_serie3_ib + geom_vline(xintercept=my.lines3_ib, linetype="dashed") 
+
+p_serie3_ib <- p_serie3_ib + geom_vline(xintercept = 0)+ geom_hline(yintercept = 0) + theme(panel.background = element_blank()) #eliminam el fons i la quadrícula del gràfic
+
+ggplotly(p_serie3_ib)
+```
+
+Per escriure la funció a trossos tenim:
+
+```{r}
+#pendents
+slope(serie3_ib.seg)
+#punts d'intersecció
+intercept(serie3_ib.seg)
+```
+
+L'error de la regressió degmentada és:
+```{r}
+accuracy(serie3_ib.seg)
+```
+
+Anem a fer la predicció per a l'any 2021. Recordem que els punts de canvi es donen a 3-2016, 8-2016, 1-2017, 8-2017, 1-2018, 8-2018, 1-2019, 8-2019, 5-2020, 7-2020. Degut a la pertorbació del COVID, sí que hi segueix havent un punt de canvi en estiu i l’altre en hivern successivament però ara no és donen al mateix mes. Per això, per predir els següents punts de canvi agafarem el mes més freqüent. Aleshores els següents punts de canvi seran en 1-2021, 8-2021 i 1-2022.
+
+- La pendent de 7-2020 a 1-2021 i de 8-2021 a 1-2022 serà : -84.735
+- La pendent de 1-2021 a 8-2021 serà : 129.756
+
+Els nous punts d’intersecció es calculen de forma anàloga que a Mallorca. Per a les tres noves rectes obtenim que són $n_1$=5936.31
+, $n_2$=−7791.13 i $n_3$=7437.75.
+
+Aleshores la predicció de 2021 serà:
+
+$\hat{y}= \left\{ \begin{array}{lcc}
+                -84.735x + 5936.31 &   si  & x \leq \psi_{11} \\
+             \\ 129.7562x - 7791.13 &  si & \psi_{11} < x \leq \psi_{12} \\
+             \\ -84.735x + 7437.75&  si & \psi_{12} < x \\
+             \end{array}
+   \right.$
+   
+on $\psi_7 = 64$ i $\psi_8 = 71$.
+
+Visualitzem-la:
+```{r}
+p3_serie_ib <- ggplot(ib, aes(x=x, y=y)) + geom_line()+
+  ylim(c(0,1600)) + 
+  ggtitle('Predicció de les Illes Balears amb el model de \nregressió segmentada després de la COVID') + 
+  xlab('índex del mes') + 
+  ylab('Despeses mensuals en €')
+
+my.model3_ib <- data.frame(x=1:63, y=fitted(serie3_ib.seg)) #model nou amb els valors ajustats de la regressió segmentada
+
+p3_serie_ib <- p3_serie_ib + geom_line(data=my.model3_ib, aes(x=x,y=y), colour="red") #afegim la recta de regressió segmentada
+
+my.lines3_ib <- serie3_ib.seg$psi[,2]# guardam on estan els punts de canvi estimats
+
+p3_serie_ib <- p3_serie_ib + geom_vline(xintercept=my.lines3_ib, linetype="dashed") 
+
+p3_serie_ib <- p3_serie_ib + geom_vline(xintercept = 0)+ geom_hline(yintercept = 0) + theme(panel.background = element_blank()) #eliminam el fons i la quadrícula del gràfic
+
+p3_serie_ib <- p3_serie_ib + geom_abline(intercept = 5936.31, slope=-84.735, colour="green") +
+                geom_abline(intercept = -7791.13 , slope=129.7562, colour="blue") +
+                geom_abline(intercept = 7437.75 , slope=-84.735, colour="orange")
+
+ggplotly(p3_serie_ib)
+```
+
+Vegem quin és aquest error que es comet:
+
+```{r}
+o3_ib<-c(serie_ib[64:75]) # dades reals per fer predicció del 2021
+
+v5_ef=c(64:70)
+f5_ef <- sapply(v5_ef, function(x) 129.7562*x-7791.13) #predicció de gener 2021 a agost 2021
+
+v6_ef=c(71:75)
+f6_ef <- sapply(v6_ef, function(x) -84.735*x + 7437.75) #predicció de setembre 2021 a desembre 2021
+
+p3_ib <- c(f5_ef,f6_ef) #predicció de 2021
+
+sqrt(sum((p3_ib-o2_ib)^2)/12)
+```
+
+<br>
+
+#### - **DECOMPOSE**
+
+Visualitzem la sèrie descomposada:
+
+```{r}
+decompose_s3_ib <- decompose(serie3_ib)
+plot(decompose_s3_ib, xlab="Any")
+```
+
+Les components de tendència són:
+```{r}
+t3_ib <- decompose_s3_ib$trend #tendències de la sèrie sense el tros a predir abans de la COVID
+t3_ib
+```
+
+I les d'estacionalitat:
+```{r}
+s3_ib <- decompose_s3_ib$seasonal #estacionalitat
+s3_ib <-  s3_ib[4:15] #estacionalitat de gener a desembre
+s3_ib
+```
+
+Anem a fer la predicció:
+```{r}
+a3_ib <- c(s3_ib[7:12],s3_ib) #estacionalitat de juliol 2020 a desembre 2021 (es per poder fer la predicció)
+
+pred3_decompose_ib <- sapply(a3_ib, function(x) 655.9567  + x) #predicció de juliol de 2019 a desembre 2020
+
+p3_dec_ib <-c(serie3_ib[1:57], pred3_decompose_ib)
+
+A3_ib<- data.frame("x" = ib[1:75,]$x, "y" = ib[1:75,]$y, "p"= p3_dec_ib)
+
+grafica3_ib_dec <- ggplot(A3_ib)+
+  geom_line(aes(x,p), color="red")+
+  geom_line(aes(x,y))+
+  labs(title="Predicció de les Illes Balears després de la COVID amb el model \nde descomposició", x="Índex del mes", y="Despeses mensualns en €")+
+  geom_vline(xintercept=0) + geom_hline(yintercept=0) + theme(panel.background = element_blank())
+
+grafica3_ib_dec
+```
+
+Calculem l'error de la predicció
+```{r}
+sqrt(sum((c(serie_ib[64:75]- pred3_decompose_ib[7:18]))^2)/12)
+```
+
+<br>
+
+Amb la funció `predict()` la predicció seria la següent:
+
+```{r}
+prediccio3_ib <- predict(serie3_ib,h=12)
+plot(prediccio3_ib, xlab="Any", ylab="Despeses mensuals en €")
+```
+
+Vegem-la juntament amb les nostres dades:
+
+```{r}
+df_prediccio3_ib <- data.frame(prediccio3_ib)
+p3_ets_ib <- data.frame("x"= 1:75, "PointForecast"=c(serie3_ib,df_prediccio3_ib$Point.Forecast), "Lo80" = c(rep(NA,63),df_prediccio3_ib$Lo.80), "Hi80" = c(rep(NA,63),df_prediccio3_ib$Hi.80), "Lo95" = c(rep(NA,63),df_prediccio3_ib$Lo.95),"Hi95" = c(rep(NA,63),df_prediccio3_ib$Hi.95))
+
+grafica_pred3_ets <- ggplot((ib[1:75,]))+
+  geom_ribbon(data = p3_ets_ib, aes(x, ymin = Lo95, ymax = Hi95), fill = "blue", alpha = 0.25) +
+  geom_ribbon(data =p3_ets_ib, aes(x, ymin = Lo80, ymax = Hi80), fill = "blue", alpha = 0.25) +
+  geom_line(data = p3_ets_ib, aes(x, PointForecast), colour = "blue") +
+  geom_line(aes(x,y), color="red")+
+  labs(title="Predicció del model ETS(A,N,A) a les Illes Balears \ndesprés de la COVID", x="Índex del mes", y="Despeses mensuals en €") + 
+  geom_vline(xintercept=0) + geom_hline(yintercept=0) + theme(panel.background = element_blank())
+
+grafica_pred3_ets
+```
+
+Obtenim un error d'uns 202 euros.
+```{r}
+accuracy(prediccio3_ib,serie_ib)
+```
+
+<br>
+
+#### - **SARIMA**
+
+Quin model proposam nosaltres? Vegem l'ACF i el PACF:
+
+```{r}
+par(mfrow=c(1,2))
+acf(serie3_ib, lag = 24)
+pacf(serie3_ib)
+```
+
+Per a la part regular obtenim p=2, q=2 i d=0.
+
+Sí hi ha indicació d'estacionalitat, llavors feim una diferenciació d'ordre 12 i tornam a calcular l'ACF i el PACF:
+```{r}
+serie3_ib_diff <- diff(serie3_ib,12)
+plot.ts(serie3_ib_diff, main="Sèrie sense estacionalitat", ylab="Sèrie diferenciada", xlab="Any")
+
+par(mfrow=c(1,2))
+acf(serie3_ib_diff)
+pacf(serie3_ib_diff)
+```
+
+Aleshores, obtenim un model ARIMA(2,0,2)(1,1,2)[12]
+
+R proposa el següent model:
+```{r}
+auto.arima(serie3_ib)
+```
+
+Llavors tenim els següents models
+```{r}
+model5_ib <- arima(serie3_ib, order=c(2,0,2), seasonal = list( order=c(1,1,2), period=12))
+
+model6_ib <- arima(serie3_ib, order=c(1,0,1), seasonal = list( order=c(1,0,0), period=12))
+```
+
+Amb uns errors de:
+
+```{r}
+accuracy(model5_ib)
+accuracy(model6_ib)
+```
+
+I les seves prediccions són:
+
+```{r}
+fc_m5_ib <- forecast(model5_ib, h=12)
+fc_m6_ib <- forecast(model6_ib,h=12)
+```
+
+```{r}
+# grafiquem-les
+#primer model
+
+pre3_ib <- data.frame("Point Forecast" = serie3_ib, "Lo 80" =  rep(NA,63), "Hi 80"= rep(NA,63), "Lo 95" = rep(NA,63), "Hi 95" = rep(NA,63))
+
+pred_m5_ib <-data.frame(fc_m5_ib)
+
+
+grafica_m5_ib <- data.frame("x" = 1:75, "PointForecast" = c(pre3_ib$Point.Forecast,pred_m5_ib$Point.Forecast), "Lo80" = c(pre3_ib$Lo.80, pred_m5_ib$Lo.80), "Hi80"= c(pre3_ib$Hi.80, pred_m5_ib$Hi.80), "Lo95" = c(pre3_ib$Lo.95, pred_m5_ib$Lo.95), "Hi95" = c(pre3_ib$Hi.95, pred_m5_ib$Hi.95))
+
+
+grafica5_ib <- ggplot(ib[1:75,])+
+  geom_ribbon(data = grafica_m5_ib, aes(x, ymin = Lo95, ymax = Hi95), fill = "blue", alpha = 0.25) +
+  geom_ribbon(data = grafica_m5_ib, aes(x, ymin = Lo80, ymax = Hi80), fill = "blue", alpha = 0.25) +
+  geom_line(data = grafica_m5_ib, aes(x, PointForecast), colour = "blue") +
+  geom_line(aes(x,y), color="red")+
+  labs(title="Predicció de les Illes Balears amb el model ARIMA (2,0,2)(1,1,2)[12] \ndesprés de la COVID", x="Índex del mes", y="Despeses mensuals en €") + 
+  geom_vline(xintercept=0) + geom_hline(yintercept=0) + theme(panel.background = element_blank())
+
+grafica5_ib
+```
+
+
+```{r}
+#segon model
+pred_m6_ib <-data.frame(fc_m6_ib)
+
+grafica_m6_ib <- data.frame("x" = 1:75, "PointForecast" = c(pre3_ib$Point.Forecast,pred_m6_ib$Point.Forecast), "Lo80" = c(pre3_ib$Lo.80, pred_m6_ib$Lo.80), "Hi80"= c(pre3_ib$Hi.80, pred_m6_ib$Hi.80), "Lo95" = c(pre3_ib$Lo.95, pred_m6_ib$Lo.95), "Hi95" = c(pre3_ib$Hi.95, pred_m6_ib$Hi.95))
+
+grafica6_ib <- ggplot(ib[1:75,])+
+  geom_ribbon(data = grafica_m6_ib, aes(x, ymin = Lo95, ymax = Hi95), fill = "blue", alpha = 0.25) +
+  geom_ribbon(data = grafica_m6_ib, aes(x, ymin = Lo80, ymax = Hi80), fill = "blue", alpha = 0.25) +
+  geom_line(data = grafica_m6_ib, aes(x, PointForecast), colour = "blue") +
+  geom_line(aes(x,y), color="red")+
+  labs(title="Predicció de les Illes Balears amb el model ARIMA (1,0,1)(1,0,0)[12] \ndesprés de la COVID", x="Índex del mes", y="Despeses mensuals en €") + 
+  geom_vline(xintercept=0) + geom_hline(yintercept=0) + theme(panel.background = element_blank())
+
+grafica6_ib
+```
+
+Vegem quin és l'error de cada model i estudiem-los
+```{r}
+accuracy(fc_m5_ib,serie_ib[64:75], h=12)
+accuracy(fc_m6_ib,serie_ib[64:75], h=12)
+
+checkresiduals(fc_m5_ib)
+checkresiduals(fc_m6_ib)
+
+par(mfrow=c(1,2))
+qqPlot(fc_m5_ib$residuals, id=FALSE, mean=mean(fc_m5_ib$residuals), sd=sd(fc_m5_ib$residuals))
+qqPlot(fc_m6_ib$residuals, id=FALSE, mean=mean(fc_m6_ib$residuals), sd=sd(fc_m6_ib$residuals))
+
+shapiro.test(fc_m5_ib$residuals)
+shapiro.test(fc_m6_ib$residuals)
+
+lillie.test(fc_m5_ib$residuals)
+lillie.test(fc_m6_ib$residuals)
+```
+
+<br>
+
+Resum dels errors que comet cada un del models anteriors:
+
+|                     | reg. segmentada | descomposició clàssica | ETS(A,N,A) | ARIMA (2,0,2)(1,1,2)[12] | ARIMA (1,0,1)(1,0,0)[12] |
+|---------------------|:---------------:|:----------------------:|:----------:|:------------------------:|:------------------------:|
+| **error model**     |      77.87      |                        |   118.25   |          105.98          |           113.1          |
+| **error predicció** |     526.086     |         272.923        |   201.79   |          447.77          |          296.93          |
